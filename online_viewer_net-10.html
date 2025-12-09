@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Survey Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+  <!-- Supabase + charts logic -->
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+    const SUPABASE_URL = "https://vfkiyxzibjvemnydreen.supabase.co";
+    const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZma2l5eHppYmp2ZW1ueWRyZWVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjUyODYwMzYsImV4cCI6MjA4MDg2MjAzNn0.mZOrXEsmnVQ6Yu93a2wlyFLrmUqW73rj5tDtS81IrN0";
+
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // Store data + chart instances so we can re-render
+    let surveyData = [];
+    let rolesChartInstance = null;
+    let ageChartInstance = null;
+    let interestByRoleChartInstance = null;
+    let responsesOverTimeChartInstance = null;
+    let attributeChartInstance = null;
+    let interestPieInstance = null;
+    let interestByAgeGroupCache = {};
+
+    async function fetchSurveyData() {
+      const { data, error } = await supabase
+        .from("survey_responses")
+        .select("created_at, role, age_group, interest_level, email, feedback");
+
+      if (error) {
+        console.error("Error fetching data:", error);
+        const statusEl = document.getElementById("status");
+        statusEl.textContent = "Failed to load data. Check console.";
+        return [];
+      }
+      return data ?? [];
+    }
+
+    /* ---------- aggregation helpers ---------- */
+
+    function aggregateCounts(data, key) {
+      const counts = {};
+      for (const row of data) {
+        const value = row[key] ?? "Unknown";
+        counts[value] = (counts[value] || 0) + 1;
+      }
+      return counts;
+    }
+
+    function aggregateInterestByRole(data) {
+      const sums = {};
+      const counts = {};
+
+      for (const row of data) {
+        const role = row.role || "Unknown";
+        const lvl = row.interest_level ?? null;
+        if (lvl === null) continue;
+
+        sums[role] = (sums[role] || 0) + lvl;
+        counts[role] = (counts[role] || 0) + 1;
+      }
+
+      const avg = {};
+      for (const role of Object.keys(sums)) {
+        avg[role] = sums[role] / counts[role];
+      }
+      return avg;
+    }
+
+    function aggregateResponsesOverTime(data) {
+      const counts = {};
+      for (const row of data) {
+        const d = new Date(row.created_at);
+        if (Number.isNaN(d.getTime())) continue;
+        const dateStr = d.toISOString().slice(0, 10);
+        counts[dateStr] = (counts[dateStr] || 0) + 1;
+      }
+      const dates = Object.keys(counts).sort();
+      return { dates, counts: dates.map((d) => counts[d]) };
+    }
+
+    function buildInterestByAgeGroup(data) {
+      const result = {};
+      for (const row of data) {
+        const age = row.age_group || "Unknown";
+        const lvl = row.interest_level ?? null;
+        if (lvl === null) continue;
+
+        if (!result[age]) result[age] = {};
+        result[age][lvl] = (result[age][lvl] || 0) + 1;
+      }
+      return result;
+    }
+
+    /* ---------- chart helpers ---------- */
+
+    function makeBarChart(ctx, labels, values, labelText) {
+      return new Chart(ctx, {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: labelText,
+              data: values
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: false }
+          }
+        }
+      });
+    }
+
+    function makeLineChart(ctx, labels, values, labelText) {
+      return new Chart(ctx, {
+        type: "line",
+        data: {
+          labels,
+          datasets: [
+            {
+              label: labelText,
+              data: values
+            }
+          ]
+        },
+        options: {
+          responsive: true,
+          plugins: {
+            legend: { display: false }
+          }
+        }
+      });
+    }
+
+    /* ---------- individual render functions ---------- */
+
+    function renderRolesChart() {
+      const roleCounts = aggregateCounts(surveyData, "role");
+      const labels = Object.keys(roleCounts);
+      const values = labels.map((r) => roleCounts[r]);
+
+      if (rolesChartInstance) rolesChartInstance.destroy();
+      rolesChartInstance = makeBarChart(
+        document.getElementById("rolesChart"),
+        labels,
+        values,
+        "Number of responses"
+      );
+    }
+
+    function renderAgeChart() {
+      const ageCounts = aggregateCounts(surveyData, "age_group");
+      const labels = Object.keys(ageCounts);
+      const values = labels.map((a) => ageCounts[a]);
+
+      if (ageChartInstance) ageChartInstance.destroy();
+      ageChartInstance = makeBarChart(
+        document.getElementById("ageChart"),
+        labels,
+        values,
+        "Number of responses"
+      );
+    }
+
+    function renderInterestByRoleChart() {
+      const interestByRole = aggregateInterestByRole(surveyData);
+      const labels = Object.keys(interestByRole);
+      const values = labels.map((r) => interestByRole[r]);
+
+      if (interestByRoleChartInstance) interestByRoleChartInstance.destroy();
+      interestByRoleChartInstance = makeBarChart(
+        document.getElementById("interestByRoleChart"),
+        labels,
+        values,
+        "Average interest level"
+      );
+    }
+
+    function renderResponsesOverTimeChart() {
+      const overTime = aggregateResponsesOverTime(surveyData);
+
+      if (responsesOverTimeChartInstance)
+        responsesOverTimeChartInstance.destroy();
+      responsesOverTimeChartInstance = makeLineChart(
+        document.getElementById("responsesOverTimeChart"),
+        overTime.dates,
+        overTime.counts,
+        "Responses per day"
+      );
+    }
+
+    function renderAttributeChart(attr) {
+      const ctx = document.getElementById("attributeChart");
+      const counts = aggregateCounts(surveyData, attr);
+      const labels = Object.keys(counts);
+      const values = labels.map((l) => counts[l]);
+
+      if (attributeChartInstance) attributeChartInstance.destroy();
+      attributeChartInstance = makeBarChart(ctx, labels, values, "Count");
+    }
+
+    function initAttributeControls() {
+      const select = document.getElementById("attributeSelect");
+      select.addEventListener("change", (e) => {
+        renderAttributeChart(e.target.value);
+      });
+      // initial render
+      renderAttributeChart(select.value);
+    }
+
+    function renderInterestPieForAge(ageGroup) {
+      const ctx = document.getElementById("interestByAgePie");
+      const entries = interestByAgeGroupCache[ageGroup] || {};
+      const labels = Object.keys(entries);
+      const values = labels.map((k) => entries[k]);
+
+      if (interestPieInstance) interestPieInstance.destroy();
+      interestPieInstance = new Chart(ctx, {
+        type: "pie",
+        data: {
+          labels,
+          datasets: [
+            {
+              data: values
+            }
+          ]
+        },
+        options: {
+          responsive: true
+        }
+      });
+    }
+
+    function initInterestPieControls() {
+      interestByAgeGroupCache = buildInterestByAgeGroup(surveyData);
+      const select = document.getElementById("ageGroupSelect");
+      select.innerHTML = "";
+
+      const ageGroups = Object.keys(interestByAgeGroupCache);
+      ageGroups.forEach((age) => {
+        const opt = document.createElement("option");
+        opt.value = age;
+        opt.textContent = age;
+        select.appendChild(opt);
+      });
+
+      if (ageGroups.length > 0) {
+        select.value = ageGroups[0];
+        renderInterestPieForAge(ageGroups[0]);
+      }
+
+      select.addEventListener("change", (e) => {
+        renderInterestPieForAge(e.target.value);
+      });
+    }
+
+    function renderEmailCounter() {
+      const total = surveyData.length;
+      const withEmail = surveyData.filter(
+        (row) => row.email && row.email.trim() !== ""
+      ).length;
+
+      const el = document.getElementById("emailCounter");
+      el.textContent = `${withEmail} of ${total} responses include an email`;
+    }
+
+    function renderFeedbackList() {
+      const container = document.getElementById("feedbackList");
+      container.innerHTML = "";
+
+      const feedbackRows = surveyData.filter(
+        (row) => row.feedback && row.feedback.trim() !== ""
+      );
+
+      if (feedbackRows.length === 0) {
+        container.textContent = "No feedback yet.";
+        return;
+      }
+
+      feedbackRows.forEach((row) => {
+        const item = document.createElement("div");
+        item.className = "feedback-item";
+
+        const meta = document.createElement("div");
+        meta.className = "feedback-meta";
+
+        const date = new Date(row.created_at);
+        const dateStr = Number.isNaN(date.getTime())
+          ? ""
+          : date.toISOString().slice(0, 10);
+
+        meta.textContent = [row.role || "Unknown role", row.age_group || "Unknown age", dateStr]
+          .filter(Boolean)
+          .join(" · ");
+
+        const text = document.createElement("div");
+        text.className = "feedback-text";
+        text.textContent = row.feedback;
+
+        item.appendChild(meta);
+        item.appendChild(text);
+        container.appendChild(item);
+      });
+    }
+
+    async function init() {
+      const statusEl = document.getElementById("status");
+      statusEl.textContent = "Loading data…";
+
+      surveyData = await fetchSurveyData();
+
+      if (!surveyData.length) {
+        statusEl.textContent = "No data found.";
+        return;
+      }
+
+      statusEl.textContent = `Loaded ${surveyData.length} responses`;
+
+      // core charts
+      renderRolesChart();
+      renderAgeChart();
+      renderInterestByRoleChart();
+      renderResponsesOverTimeChart();
+
+      // dynamic attribute chart
+      initAttributeControls();
+
+      // interest pie by age group
+      initInterestPieControls();
+
+      // email counter + feedback list
+      renderEmailCounter();
+      renderFeedbackList();
+    }
+
+    window.addEventListener("DOMContentLoaded", init);
+  </script>
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #050505;
+      color: #f5f5f5;
+      margin: 0;
+      padding: 1.5rem;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    h1 {
+      font-size: 1.8rem;
+      margin-bottom: 0.25rem;
+    }
+    #status {
+      font-size: 0.9rem;
+      opacity: 0.7;
+      margin-bottom: 0.5rem;
+    }
+    .summary-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      font-size: 0.95rem;
+      opacity: 0.85;
+    }
+    .pill {
+      padding: 0.3rem 0.7rem;
+      border-radius: 999px;
+      background: #111;
+      border: 1px solid #222;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1.5rem;
+    }
+    .card {
+      background: #111;
+      border-radius: 0.75rem;
+      padding: 1rem 1.2rem;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      min-height: 0;
+    }
+    .card h2 {
+      font-size: 1rem;
+      margin: 0;
+    }
+    .card-header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+    }
+    .card-header-row label {
+      font-size: 0.85rem;
+      opacity: 0.85;
+      display: flex;
+      align-items: center;
+      gap: 0.3rem;
+    }
+    select {
+      background: #090909;
+      color: #f5f5f5;
+      border-radius: 0.5rem;
+      border: 1px solid #333;
+      padding: 0.25rem 0.4rem;
+      font-size: 0.85rem;
+    }
+    canvas {
+      max-height: 260px;
+    }
+    #feedbackList {
+      max-height: 260px;
+      overflow-y: auto;
+      padding-right: 0.5rem;
+    }
+    .feedback-item {
+      margin-bottom: 0.75rem;
+      padding-bottom: 0.75rem;
+      border-bottom: 1px solid #222;
+    }
+    .feedback-meta {
+      font-size: 0.8rem;
+      opacity: 0.7;
+      margin-bottom: 0.2rem;
+    }
+    .feedback-text {
+      font-size: 0.9rem;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+    @media (max-width: 600px) {
+      body {
+        padding: 1rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Survey Insights</h1>
+    <div id="status">Loading…</div>
+
+    <div class="summary-row">
+      <div class="pill" id="emailCounter">Calculating email stats…</div>
+      <div class="pill">Source: survey_responses</div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Roles</h2>
+        <canvas id="rolesChart"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Age groups</h2>
+        <canvas id="ageChart"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Interest level by role</h2>
+        <canvas id="interestByRoleChart"></canvas>
+      </div>
+
+      <div class="card">
+        <h2>Responses over time</h2>
+        <canvas id="responsesOverTimeChart"></canvas>
+      </div>
+
+      <div class="card">
+        <div class="card-header-row">
+          <h2>Attribute distribution</h2>
+          <label>
+            Attribute:
+            <select id="attributeSelect">
+              <option value="role">Role</option>
+              <option value="age_group">Age group</option>
+              <option value="interest_level">Interest level</option>
+            </select>
+          </label>
+        </div>
+        <canvas id="attributeChart"></canvas>
+      </div>
+
+      <div class="card">
+        <div class="card-header-row">
+          <h2>Interest distribution by age group</h2>
+          <label>
+            Age group:
+            <select id="ageGroupSelect"></select>
+          </label>
+        </div>
+        <canvas id="interestByAgePie"></canvas>
+      </div>
+
+      <div class="card" style="grid-column: 1 / -1;">
+        <h2>Raw feedback (scrollable)</h2>
+        <div id="feedbackList"></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
